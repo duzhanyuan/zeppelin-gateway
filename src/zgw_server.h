@@ -4,11 +4,13 @@
 #include <string>
 #include <map>
 #include <pthread.h>
+#include <unistd.h>
 
 #include <glog/logging.h>
 #include "pink/include/server_thread.h"
 #include "slash/include/slash_status.h"
 #include "slash/include/slash_mutex.h"
+#include "slash/include/slash_coding.h"
 
 #include "src/libzgw/zgw_store.h"
 #include "src/libzgw/zgw_namelist.h"
@@ -20,12 +22,36 @@
 
 using slash::Status;
 
-class MyThreadEnvHandle : public pink::ThreadEnvHandle {
- public:
-  MyThreadEnvHandle() {
-  }
+enum S3Interface {
+  kAuth = 0,
+  kListAllBuckets,
+  kDeleteBucket,
+  kListObjects,
+  kHeadBucket,
+  kListMultiPartUpload,
+  kPutBucket,
+  kDeleteObject,
+  kDeleteMultiObjects,
+  kGetObject,
+  kGetObjectPartial,
+  kHeadObject,
+  kPostObject,
+  kPutObject,
+  kPutObjectCopy,
+  kInitMultipartUpload,
+  kUploadPart,
+  kUploadPartCopy,
+  kUploadPartCopyPartial,
+  kCompleteMultiUpload,
+  kAbortMultiUpload,
+  kListParts,
+  kUnknow,
+};
 
-  virtual ~MyThreadEnvHandle() {
+class ZgwThreadEnvHandle : public pink::ThreadEnvHandle {
+ public:
+  ZgwThreadEnvHandle() {}
+  virtual ~ZgwThreadEnvHandle() {
     for (auto s : stores_) {
       delete s;
     }
@@ -36,6 +62,8 @@ class MyThreadEnvHandle : public pink::ThreadEnvHandle {
  private:
   mutable std::vector<libzgw::ZgwStore*> stores_;
 };
+
+class ZgwMonitor;
 
 class ZgwServer {
  public:
@@ -79,11 +107,12 @@ class ZgwServer {
     object_mutex_.Unlock(full_object_name);
   }
 
-  uint64_t qps();
-  void AddQueryNum();
-
   bool running() const {
     return !should_exit_.load();
+  }
+
+  ZgwMonitor* zgw_monitor() {
+    return zgw_monitor_;
   }
 
   void Exit();
@@ -103,15 +132,11 @@ class ZgwServer {
   AdminConnFactory* admin_conn_factory_;
   pink::ServerThread* zgw_dispatch_thread_;
   pink::ServerThread* zgw_admin_thread_;
+  ZgwMonitor* zgw_monitor_;
 
   libzgw::ListMap* buckets_list_;
   libzgw::ListMap* objects_list_;
   slash::RecordMutex object_mutex_;
-
-  uint64_t last_query_num_;
-  uint64_t cur_query_num_;
-  uint64_t last_time_us_;
-  pthread_rwlock_t qps_lock_;
 };
 
 #endif

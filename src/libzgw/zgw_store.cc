@@ -105,4 +105,30 @@ Status ZgwStore::GetNameList(NameList* nlist) {
   return s;
 }
 
+Status ZgwStore::GetZgwSapce(uint64_t* meta_vol, uint64_t* data_vol) {
+  uint64_t mv = 0;
+  uint64_t dv = 0;
+  std::vector<std::pair<libzp::Node, libzp::SpaceInfo>> nodes;
+  Status s = zp_->InfoSpace(kZgwMetaTableName, &nodes);
+  if (!s.ok()) {
+    return s;
+  }
+  for (auto& n : nodes) {
+    mv += n.second.used;
+  }
+
+  s = zp_->InfoSpace(kZgwDataTableName, &nodes);
+  if (!s.ok()) {
+    return s;
+  }
+  for (auto& n : nodes) {
+    dv += n.second.used;
+  }
+
+  *meta_vol = mv;
+  *data_vol = dv;
+
+  return Status::OK();
+}
+
 }  // namespace libzgw

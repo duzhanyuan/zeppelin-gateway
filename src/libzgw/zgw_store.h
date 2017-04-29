@@ -61,6 +61,15 @@ public:
                              const std::vector<std::pair<int, ZgwObject>>& parts,
                              std::string *final_etag);
 
+  // Original interface
+  Status GetMeta(const std::string& key, std::string* value) {
+    return zp_->Get(kZgwMetaTableName, key, value);
+  }
+  Status SetMeta(const std::string& key, const std::string& value) {
+    return zp_->Set(kZgwMetaTableName, key, value);
+  }
+  Status GetZgwSapce(uint64_t* meta_vol, uint64_t* data_vol);
+
 private:
   ZgwStore();
   Status Init(const std::vector<std::string>& ips);

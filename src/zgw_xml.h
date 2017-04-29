@@ -23,6 +23,7 @@ enum ErrorType {
   MethodNotAllowed,
   InvalidArgument,
   InvalidRange,
+  InvalidRequest,
   AccessDenied,
 };
 

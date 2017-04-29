@@ -15,6 +15,9 @@ class ZgwAuth {
 
   bool ParseAuthInfo(const pink::HttpRequest* req, std::string* access_key);
   bool Auth(const pink::HttpRequest *req, const std::string& secret_key);
+  bool IsSignatureV2() {
+    return encryption_method_ != "AWS4-HMAC-SHA256";
+  }
 
   std::string canonical_request() {
     return canonical_request_;

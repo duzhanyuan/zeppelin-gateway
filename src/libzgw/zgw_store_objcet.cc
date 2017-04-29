@@ -5,6 +5,10 @@
 
 #include <openssl/md5.h>
 #include "slash/include/slash_string.h"
+#include "src/zgw_server.h"
+#include "src/zgw_monitor.h"
+
+extern ZgwServer* g_zgw_server;
 
 namespace libzgw {
 
@@ -20,19 +24,40 @@ Status ZgwStore::AddObject(ZgwObject& object) {
     }
   }
 
+  bool obexist = false;
+
   // Delete Old Data, since the object name may already exist
   std::string ometa;
   libzgw::ZgwObject old_object(object.bucket_name(), object.name());
   s = zp_->Get(kZgwMetaTableName, object.MetaKey(), &ometa);
   if (s.ok()) {
+    obexist = true;
     old_object.ParseMetaValue(&ometa);
     for (uint32_t ti = object.strip_count(); ti < old_object.strip_count(); ti++) {
       zp_->Delete(kZgwDataTableName, old_object.DataKey(ti));
     }
   }
 
+  g_zgw_server->zgw_monitor()->AddClusterTraffic(object.info().size);
   // Set Object Meta
-  return zp_->Set(kZgwMetaTableName, object.MetaKey(), object.MetaValue());
+  s = zp_->Set(kZgwMetaTableName, object.MetaKey(), object.MetaValue());
+  if (!s.ok()) {
+    return s;
+  }
+
+  if (obexist) {
+    int diff = old_object.info().size - object.info().size;
+    if (diff > 0) {
+      g_zgw_server->zgw_monitor()->DelBucketVol(object.bucket_name(), diff);
+    } else if (diff < 0) {
+      g_zgw_server->zgw_monitor()->AddBucketVol(object.bucket_name(), 0 - diff);
+    }
+  } else {
+    g_zgw_server->zgw_monitor()->AddBucketVol(object.bucket_name(), object.info().size);
+  }
+
+  g_zgw_server->zgw_monitor()->AddBucketTraffic(object.bucket_name(), object.info().size);
+  return s;
 }
 
 Status ZgwStore::DelObject(const std::string &bucket_name,
@@ -76,6 +101,7 @@ Status ZgwStore::DelObject(const std::string &bucket_name,
   for (; index < object.strip_count(); index++) {
     zp_->Delete(kZgwDataTableName, object.DataKey(index));
   }
+  g_zgw_server->zgw_monitor()->DelBucketVol(bucket_name, object.info().size);
   return Status::OK();
 }
 
@@ -99,6 +125,8 @@ Status ZgwStore::GetPartialObject(ZgwObject* object, int start_byte, int partial
       candidate_value.append(svalue);
     }
     object->AppendContent(candidate_value.substr(start_byte, partial_size));
+    g_zgw_server->zgw_monitor()->AddBucketTraffic(object->bucket_name(), partial_size);
+    g_zgw_server->zgw_monitor()->AddClusterTraffic(partial_size);
   } else {
     for (auto n : object->part_nums()) {
       // Get sub object size;
@@ -243,6 +271,8 @@ Status ZgwStore::GetObject(ZgwObject* object, bool need_content) {
       }
       object->ParseNextStrip(&cvalue);
     }
+    g_zgw_server->zgw_monitor()->AddBucketTraffic(object->bucket_name(), object->info().size);
+    g_zgw_server->zgw_monitor()->AddClusterTraffic(object->info().size);
   }
 
   return Status::OK();

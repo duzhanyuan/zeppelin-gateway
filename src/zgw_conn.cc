@@ -4,8 +4,10 @@
 #include <cctype>
 #include <cstdint>
 
+#include "slash/include/env.h"
 #include "src/libzgw/zgw_namelist.h"
 #include "src/zgw_server.h"
+#include "src/zgw_monitor.h"
 #include "src/zgw_auth.h"
 #include "src/zgw_xml.h"
 #include "src/zgw_util.h"
@@ -51,7 +53,8 @@ ZgwConn::ZgwConn(const int fd,
 void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp) {
   Timer t("DealMessage " + ip_port() + ":");
   // DumpHttpRequest(req);
-  g_zgw_server->AddQueryNum();
+  g_zgw_server->zgw_monitor()->AddQueryNum();
+  g_zgw_server->zgw_monitor()->AddRequest();
 
   // Copy req and resp
   req_ = const_cast<pink::HttpRequest *>(req);
@@ -61,6 +64,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
   if (req_->path[0] != '/') {
     resp_->SetStatusCode(500);
     resp_->SetBody("Path parse error: " + req_->path);
+    g_zgw_server->zgw_monitor()->AddApiRequest(kAuth, 500);
     return;
   }
 
@@ -74,9 +78,15 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
   ZgwAuth zgw_auth;
   if (!zgw_auth.ParseAuthInfo(req_, &access_key_) ||
       !store_->GetUser(access_key_, &zgw_user_).ok()) {
-    resp_->SetStatusCode(403);
-    resp_->SetBody(ErrorXml(InvalidAccessKeyId));
-    DLOG(INFO) << "InvalidAccessKeyId";
+    if (zgw_auth.IsSignatureV2()) {
+      resp_->SetStatusCode(400);
+      resp_->SetBody(ErrorXml(InvalidRequest, "Please use AWS4-HMAC-SHA256."));
+    } else {
+      resp_->SetStatusCode(403);
+      resp_->SetBody(ErrorXml(InvalidAccessKeyId));
+      DLOG(INFO) << "InvalidAccessKeyId";
+    }
+    g_zgw_server->zgw_monitor()->AddApiRequest(kAuth, 403);
     return;
   }
 
@@ -86,6 +96,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
     resp_->SetBody(ErrorXml(SignatureDoesNotMatch));
     DLOG(INFO) << "Auth failed: " << ip_port() << " " << req_->headers["authorization"];
     DLOG(INFO) << "Auth failed creq: " << zgw_auth.canonical_request();
+    g_zgw_server->zgw_monitor()->AddApiRequest(kAuth, 403);
     return;
   }
   DLOG(INFO) << "Auth passed: " << ip_port() << " " << req_->headers["authorization"];
@@ -98,6 +109,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
   if (!s.ok()) {
     resp_->SetStatusCode(500);
     LOG(ERROR) << "List buckets name list failed: " << s.ToString();
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUnknow, 500);
     return;
   }
   }
@@ -110,6 +122,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
       resp_->SetStatusCode(500);
       LOG(ERROR) << "List objects name list failed: " << s.ToString();
       s = g_zgw_server->UnrefBucketList(store_, access_key_);
+      g_zgw_server->zgw_monitor()->AddApiRequest(kUnknow, 500);
       return;
     }
   }
@@ -131,31 +144,39 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
 
   if (bucket_name_.empty()) {
     if (method == kGet) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kListAllBuckets, 0);
       ListBucketHandle();
     } else {
       // Unknow request
       resp_->SetStatusCode(405);
       resp_->SetBody(ErrorXml(MethodNotAllowed));
+      g_zgw_server->zgw_monitor()->AddApiRequest(kUnknow, 500);
     }
   } else if (IsValidBucket()) {
     switch(method) {
       case kGet:
         if (req_->query_params.count("uploads")) {
+          g_zgw_server->zgw_monitor()->AddApiRequest(kListMultiPartUpload, 0);
           ListMultiPartsUpload();
         } else if (req_->query_params.count("location")) {
           GetBucketLocationHandle();
         } else {
+          g_zgw_server->zgw_monitor()->AddApiRequest(kListObjects, 0);
           ListObjectHandle();
         }
         break;
       case kPut:
+        g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 0);
         PutBucketHandle();
         break;
       case kDelete:
+        g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 0);
         DelBucketHandle();
         break;
       case kHead:
+        g_zgw_server->zgw_monitor()->AddApiRequest(kHeadBucket, 0);
         if (!buckets_name_->IsExist(bucket_name_)) {
+          g_zgw_server->zgw_monitor()->AddApiRequest(kHeadBucket, 404);
           resp_->SetStatusCode(404);
         } else {
           resp_->SetStatusCode(200);
@@ -163,6 +184,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
         break;
       case kPost:
         if (req_->query_params.find("delete") != req_->query_params.end()) {
+          g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteMultiObjects, 0);
           DelMultiObjectsHandle();
         }
         break;
@@ -172,6 +194,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
   } else if (IsValidObject()) {
     // Check whether bucket existed in namelist meta
     if (!buckets_name_->IsExist(bucket_name_)) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kUnknow, 404);
       resp_->SetStatusCode(404);
       resp_->SetBody(ErrorXml(NoSuchBucket, bucket_name_));
     } else {
@@ -180,6 +203,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
       switch(method) {
         case kGet:
           if (req_->query_params.find("uploadId") != req_->query_params.end()) {
+            g_zgw_server->zgw_monitor()->AddApiRequest(kListParts, 0);
             ListParts(req_->query_params["uploadId"]);
           } else {
             GetObjectHandle();
@@ -196,18 +220,23 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
           break;
         case kDelete:
           if (req_->query_params.find("uploadId") != req_->query_params.end()) {
+            g_zgw_server->zgw_monitor()->AddApiRequest(kAbortMultiUpload, 0);
             AbortMultiUpload(req_->query_params["uploadId"]);
           } else {
+            g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteObject, 0);
             DelObjectHandle();
           }
           break;
         case kHead:
+            g_zgw_server->zgw_monitor()->AddApiRequest(kHeadObject, 0);
           GetObjectHandle(true);
           break;
         case kPost:
           if (req_->query_params.find("uploads") != req_->query_params.end()) {
+            g_zgw_server->zgw_monitor()->AddApiRequest(kInitMultipartUpload, 0);
             InitialMultiUpload();
           } else if (req_->query_params.find("uploadId") != req_->query_params.end()) {
+            g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 0);
             CompleteMultiUpload(req_->query_params["uploadId"]);
           }
           break;
@@ -218,6 +247,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
     }
   } else {
     // Unknow request
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUnknow, 501);
     resp_->SetStatusCode(501);
     resp_->SetBody(ErrorXml(NotImplemented));
   }
@@ -231,6 +261,7 @@ void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp
     s1 = g_zgw_server->UnrefObjectList(store_, bucket_name_);
   }
   if (!s.ok() || !s1.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUnknow, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "Unref namelist failed: " << s.ToString();
     return;
@@ -254,6 +285,7 @@ void ZgwConn::InitialMultiUpload() {
   object.SetUploadId(upload_id);
   Status s = store_->AddObject(object);
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kInitMultipartUpload, 500);
     resp_->SetStatusCode(500);
     return;
   }
@@ -272,11 +304,13 @@ void ZgwConn::InitialMultiUpload() {
 void ZgwConn::UploadPartHandle(const std::string& part_num, const std::string& upload_id) {
   std::string internal_obname = libzgw::kInternalObjectNamePrefix + object_name_ + upload_id;
   if (!objects_name_->IsExist(internal_obname)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUploadPart, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchUpload, upload_id));
     return;
   }
 
+  uint64_t upload_part_start = slash::NowMicros();
   Status s;
   timeval now;
   gettimeofday(&now, NULL);
@@ -286,12 +320,15 @@ void ZgwConn::UploadPartHandle(const std::string& part_num, const std::string& u
   std::string object_content;
   if (is_copy_op) {
     Timer t("UploadPart: GetSourceObject");
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUploadPartCopy, 0);
     bool res = GetSourceObject(&object_content);
     DLOG(INFO) << "UploadPart: " << "SourceObject Size: " << object_content.size();
     if (!res) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kUploadPartCopy, 500);
       return;
     }
   } else {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUploadPart, 0);
     object_content = req_->content;
     DLOG(INFO) << "UploadPart: " << "Part Size: " << object_content.size();
   }
@@ -307,6 +344,7 @@ void ZgwConn::UploadPartHandle(const std::string& part_num, const std::string& u
                          std::atoi(part_num.c_str()));
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUploadPart, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "UploadPart data failed: " << s.ToString();
     return;
@@ -316,6 +354,10 @@ void ZgwConn::UploadPartHandle(const std::string& part_num, const std::string& u
   if (is_copy_op) {
     resp_->SetBody(CopyObjectResultXml(now, etag));
   }
+
+  double upload_time = static_cast<double>(slash::NowMicros() - upload_part_start) / 1000;
+  DLOG(INFO) << "UploadPart: time: " << upload_time << " ms", 
+  g_zgw_server->zgw_monitor()->UpdateUpPartTime(upload_time);
   resp_->SetHeaders("ETag", etag);
   resp_->SetStatusCode(200);
 }
@@ -324,6 +366,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
   Status s;
   std::string internal_obname = libzgw::kInternalObjectNamePrefix + object_name_ + upload_id;
   if (!objects_name_->IsExist(internal_obname)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchUpload, upload_id));
     return;
@@ -334,6 +377,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
   std::vector<std::pair<int, std::string>> recv_parts;
   if (!ParseCompleteMultipartUploadXml(req_->content, &recv_parts) ||
       recv_parts.empty()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 400);
     resp_->SetStatusCode(400);
     resp_->SetBody(ErrorXml(MalformedXML));
     return;
@@ -344,6 +388,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
   s = store_->ListParts(bucket_name_, internal_obname, &store_parts);
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "CompleteMultiUpload failed in list object parts: " << s.ToString();
     return;
@@ -359,11 +404,13 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
   for (size_t i = 0; i < recv_parts.size(); i++) {
     // check part num order and existance
     if (existed_parts.find(recv_parts[i].first) == existed_parts.end()) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 400);
       resp_->SetStatusCode(400);
       resp_->SetBody(ErrorXml(InvalidPart));
       return;
     }
     if (recv_parts[i].first != store_parts[i].first) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 400);
       resp_->SetStatusCode(400);
       resp_->SetBody(ErrorXml(InvalidPartOrder));
       return;
@@ -371,6 +418,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
     // Check etag
     const libzgw::ZgwObjectInfo& info = store_parts[i].second.info();
     if (info.etag != recv_parts[i].second) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 400);
       resp_->SetStatusCode(400);
       resp_->SetBody(ErrorXml(InvalidPart));
       return;
@@ -381,6 +429,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
   if (objects_name_->IsExist(object_name_)) {
     s = store_->DelObject(bucket_name_, object_name_);
     if (!s.ok() && !s.IsNotFound()) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 500);
       resp_->SetStatusCode(500);
       LOG(ERROR) << "CompleteMultiUpload failed in delete old object: " << s.ToString();
       return;
@@ -395,6 +444,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
   s = store_->CompleteMultiUpload(bucket_name_, internal_obname, store_parts, &final_etag);
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kCompleteMultiUpload, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "CompleteMultiUpload failed: " << s.ToString();
     return;
@@ -416,6 +466,7 @@ void ZgwConn::CompleteMultiUpload(const std::string& upload_id) {
 void ZgwConn::AbortMultiUpload(const std::string& upload_id) {
   std::string internal_obname = libzgw::kInternalObjectNamePrefix + object_name_ + upload_id;
   if (!objects_name_->IsExist(internal_obname)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kAbortMultiUpload, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchUpload, upload_id));
     return;
@@ -426,6 +477,7 @@ void ZgwConn::AbortMultiUpload(const std::string& upload_id) {
     if (s.IsNotFound()) {
       // But founded in list meta, continue to delete from list meta
     } else {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kAbortMultiUpload, 500);
       resp_->SetStatusCode(500);
       LOG(ERROR) << "AbortMultiUpload failed: " << s.ToString();
       return;
@@ -443,6 +495,7 @@ void ZgwConn::ListParts(const std::string& upload_id) {
   Status s;
   std::string internal_obname = libzgw::kInternalObjectNamePrefix + object_name_ + upload_id;
   if (!objects_name_->IsExist(internal_obname)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListParts, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchUpload, upload_id));
     return;
@@ -455,6 +508,7 @@ void ZgwConn::ListParts(const std::string& upload_id) {
   if (!mus.empty()) {
     max_parts = std::atoi(mus.c_str());
     if (max_parts <= 0 && !isdigit(mus[0])) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kListParts, 400);
       resp_->SetStatusCode(400);
       resp_->SetBody(ErrorXml(InvalidArgument, "max-parts"));
       return;
@@ -469,6 +523,7 @@ void ZgwConn::ListParts(const std::string& upload_id) {
   s = store_->ListParts(bucket_name_, internal_obname, &parts);
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListParts, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "ListParts failed: " << s.ToString();
     return;
@@ -505,6 +560,7 @@ void ZgwConn::ListParts(const std::string& upload_id) {
 void ZgwConn::ListMultiPartsUpload() {
   // Check whether bucket existed in namelist meta
   if (!buckets_name_->IsExist(bucket_name_)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListMultiPartUpload, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchBucket, bucket_name_));
     return;
@@ -513,6 +569,7 @@ void ZgwConn::ListMultiPartsUpload() {
 
   std::string delimiter = req_->query_params["delimiter"];
   if (!delimiter.empty() && delimiter.size() != 1) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListMultiPartUpload, 400);
     resp_->SetStatusCode(400);
     resp_->SetBody(ErrorXml(InvalidArgument, "delimiter"));
     return;
@@ -523,6 +580,7 @@ void ZgwConn::ListMultiPartsUpload() {
   if (!mus.empty()) {
     max_uploads = std::atoi(mus.c_str());
     if (max_uploads <= 0 && !isdigit(mus[0])) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kListMultiPartUpload, 400);
       resp_->SetStatusCode(400);
       resp_->SetBody(ErrorXml(InvalidArgument, "max-uploads"));
       return;
@@ -610,6 +668,7 @@ void ZgwConn::ListMultiPartsUpload() {
   s = store_->ListObjects(bucket_name_, candidate_names, &objects);
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListMultiPartUpload, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "ListMultiPartsUpload failed: " << s.ToString();
     return;
@@ -638,6 +697,7 @@ void ZgwConn::ListMultiPartsUpload() {
 
 void ZgwConn::DelMultiObjectsHandle() {
   if (!buckets_name_->IsExist(bucket_name_)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteMultiObjects, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchBucket, bucket_name_));
     return;
@@ -645,6 +705,7 @@ void ZgwConn::DelMultiObjectsHandle() {
 
   std::vector<std::string> keys;
   if (!ParseDelMultiObjectXml(req_->content, &keys)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteMultiObjects, 400);
     resp_->SetStatusCode(400);
     resp_->SetBody(ErrorXml(MalformedXML));
   }
@@ -683,6 +744,7 @@ void ZgwConn::DelObjectHandle() {
     if (s.IsNotFound()) {
       // But founded in list meta, continue to delete from list meta
     } else {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteObject, 500);
       resp_->SetStatusCode(500);
       LOG(ERROR) << "Delete object data failed: " << s.ToString();
       return;
@@ -732,6 +794,7 @@ void ZgwConn::GetObjectHandle(bool is_head_op) {
   DLOG(INFO) << "GetObjects: " << bucket_name_ << "/" << object_name_;
 
   if (!objects_name_->IsExist(object_name_)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kGetObject, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchKey, object_name_));
     return;
@@ -748,24 +811,29 @@ void ZgwConn::GetObjectHandle(bool is_head_op) {
   libzgw::ZgwObject object(bucket_name_, object_name_);
   bool need_content = !is_head_op;
   bool need_partial = !segments.empty();
+
   if (need_partial && need_content) {
     for (auto& seg : segments) {
       std::cout << seg.first << " - " << seg.second << std::endl;
     }
     Timer t("GetObject: GetPartialObject");
+    g_zgw_server->zgw_monitor()->AddApiRequest(kGetObjectPartial, 0);
     s = store_->GetPartialObject(&object, segments);
   } else {
     Timer t("GetObject: ");
+    g_zgw_server->zgw_monitor()->AddApiRequest(kGetObject, 0);
     s = store_->GetObject(&object, need_content);
   }
   if (!s.ok()) {
     if (s.IsNotFound()) {
       LOG(WARNING) << "Data size maybe strip count error";
     } else if (s.IsEndFile()) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kGetObjectPartial, 416);
       resp_->SetStatusCode(416);
       resp_->SetBody(ErrorXml(InvalidRange, bucket_name_));
       return;
     } else {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kGetObject, 500);
       resp_->SetStatusCode(500);
       LOG(ERROR) << "Get object data failed: " << s.ToString();
       return;
@@ -832,6 +900,7 @@ bool ZgwConn::GetSourceObject(std::string* content) {
   if (need_partial) {
     DLOG(INFO) << "Get partial object: " << source << " " << segments[0].first << "-" << segments[0].second;
     Timer t("GetObject: GetPartialObject from zp");
+    g_zgw_server->zgw_monitor()->AddApiRequest(kUploadPartCopyPartial, 0);
     s = store_->GetPartialObject(&src_object, segments);
     if (s.IsEndFile()) {
       resp_->SetStatusCode(416);
@@ -864,12 +933,15 @@ void ZgwConn::PutObjectHandle() {
   bool is_copy_op = !req_->headers["x-amz-copy-source"].empty();
   if (is_copy_op) {
     Timer t("PutObject: GetSourceObject");
+    g_zgw_server->zgw_monitor()->AddApiRequest(kPutObjectCopy, 0);
     bool res = GetSourceObject(&object_content);
     DLOG(INFO) << "PutObject: " << "SourceObject Size: " << object_content.size();
     if (!res) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kPutObjectCopy, 500);
       return;
     }
   } else {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kPutObject, 0);
     object_content = req_->content;
   }
   {
@@ -884,6 +956,7 @@ void ZgwConn::PutObjectHandle() {
   s = store_->AddObject(object);
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kPutObject, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "Put object data failed: " << s.ToString();
     return;
@@ -922,6 +995,7 @@ void ZgwConn::ListObjectHandle() {
 
   // Check whether bucket existed in namelist meta
   if (!buckets_name_->IsExist(bucket_name_)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListObjects, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchBucket, bucket_name_));
     return;
@@ -930,6 +1004,7 @@ void ZgwConn::ListObjectHandle() {
 
   std::string delimiter = req_->query_params["delimiter"];
   if (!delimiter.empty() && delimiter.size() != 1) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListObjects, 400);
     resp_->SetStatusCode(400);
     resp_->SetBody(ErrorXml(InvalidArgument, "delimiter"));
     return;
@@ -940,6 +1015,7 @@ void ZgwConn::ListObjectHandle() {
   if (!mks.empty()) {
     max_keys = std::atoi(mks.c_str());
     if (max_keys <= 0 && !isdigit(mks[0])) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kListObjects, 400);
       resp_->SetStatusCode(400);
       resp_->SetBody(ErrorXml(InvalidArgument, "max-keys"));
       return;
@@ -951,6 +1027,7 @@ void ZgwConn::ListObjectHandle() {
   std::string start_after = req_->query_params["start-after"];
   std::string is_listv2 = req_->query_params["list-type"];
   if (!is_listv2.empty() && is_listv2 != "2") {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListObjects, 400);
     resp_->SetStatusCode(400);
     resp_->SetBody(ErrorXml(InvalidArgument, "list-type"));
     return;
@@ -1066,6 +1143,7 @@ void ZgwConn::ListObjectHandle() {
   s = store_->ListObjects(bucket_name_, candidate_names, &objects);
   }
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kListObjects, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "ListObjects failed: " << s.ToString();
     return;
@@ -1080,6 +1158,7 @@ void ZgwConn::DelBucketHandle() {
   DLOG(INFO) << "DeleteBucket: " << bucket_name_;
   // Check whether bucket existed in namelist meta
   if (!buckets_name_->IsExist(bucket_name_)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 404);
     resp_->SetStatusCode(404);
     resp_->SetBody(ErrorXml(NoSuchBucket, bucket_name_));
     return;
@@ -1092,10 +1171,12 @@ void ZgwConn::DelBucketHandle() {
   libzgw::ZgwBucket bucket(bucket_name_);
   s = store_->GetBucket(&bucket);
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "DeleteBucket: Get bucekt meta failed: " << s.ToString();
   }
   if (zgw_user_->user_info().user_id != bucket.user_info().user_id) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 403);
     resp_->SetStatusCode(403);
     resp_->SetBody(ErrorXml(AccessDenied));
     LOG(ERROR) << "DeleteBucket: not own by user: " << zgw_user_->user_info().disply_name;
@@ -1115,12 +1196,14 @@ void ZgwConn::DelBucketHandle() {
       for (auto &name : objects_name_->name_list) {
         s = store_->DelObject(bucket_name_, name);
         if (!s.ok()) {
+          g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 500);
           resp_->SetStatusCode(500);
           LOG(ERROR) << "Delete bucket failed: " << s.ToString();
         }
       }
       objects_name_->name_list.clear();
     } else {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 409);
       resp_->SetStatusCode(409);
       resp_->SetBody(ErrorXml(BucketNotEmpty, bucket_name_));
       LOG(ERROR) << "DeleteBucket: BucketNotEmpty";
@@ -1133,6 +1216,7 @@ void ZgwConn::DelBucketHandle() {
     buckets_name_->Delete(bucket_name_);
     resp_->SetStatusCode(204);
   } else if (s.IsIOError()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kDeleteBucket, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "Delete bucket failed: " << s.ToString();
   }
@@ -1145,6 +1229,7 @@ void ZgwConn::PutBucketHandle() {
 
   // Check whether bucket existed in namelist meta
   if (buckets_name_->IsExist(bucket_name_)) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 409);
     resp_->SetStatusCode(409);
     resp_->SetBody(ErrorXml(BucketAlreadyOwnedByYou, ""));
     return;
@@ -1154,6 +1239,7 @@ void ZgwConn::PutBucketHandle() {
   std::set<libzgw::ZgwUser *> user_list; // name : keys
   Status s = store_->ListUsers(&user_list);
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "Create bucket failed: " << s.ToString();
   }
@@ -1163,6 +1249,7 @@ void ZgwConn::PutBucketHandle() {
     auto access_key = user->access_key();
     s = g_zgw_server->RefAndGetBucketList(store_, access_key, &tmp_bk_list);
     if (!s.ok()) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 500);
       resp_->SetStatusCode(500);
       LOG(ERROR) << "Create bucket failed: " << s.ToString();
       return;
@@ -1172,11 +1259,13 @@ void ZgwConn::PutBucketHandle() {
     }
     s = g_zgw_server->UnrefBucketList(store_, access_key);
     if (!s.ok()) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 500);
       resp_->SetStatusCode(500);
       LOG(ERROR) << "Create bucket failed: " << s.ToString();
       return;
     }
     if (already_exist) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 409);
       resp_->SetStatusCode(409);
       resp_->SetBody(ErrorXml(BucketAlreadyExists));
       return;
@@ -1188,6 +1277,7 @@ void ZgwConn::PutBucketHandle() {
   // Create bucket in zp
   s = store_->AddBucket(bucket_name_, zgw_user_->user_info());
   if (!s.ok()) {
+      g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "Create bucket failed: " << s.ToString();
     return;
@@ -1216,6 +1306,7 @@ void ZgwConn::ListBucketHandle() {
   }
   s = store_->ListBucket(name_list, &buckets);
   if (!s.ok()) {
+    g_zgw_server->zgw_monitor()->AddApiRequest(kPutBucket, 500);
     resp_->SetStatusCode(500);
     LOG(ERROR) << "ListBuckets failed: " << s.ToString();
     return;

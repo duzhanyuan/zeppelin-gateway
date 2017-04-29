@@ -27,6 +27,10 @@ std::string ErrorXml(ErrorType etype, const std::string& extra_info) {
   doc.append_node(error);
 
   switch(etype) {
+    case InvalidRequest:
+      error->append_node(doc.allocate_node(node_element, "Code", "InvalidRequest"));
+      error->append_node(doc.allocate_node(node_element, "Message", extra_info.c_str()));
+      break;
     case AccessDenied:
       error->append_node(doc.allocate_node(node_element, "Code", "AccessDenied"));
       error->append_node(doc.allocate_node(node_element, "Message", "Access Denied"));
