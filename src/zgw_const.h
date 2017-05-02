@@ -5,8 +5,8 @@
 
 const int kMaxWorkerThread = 100;
 
-#define str(a) #a
-#define xstr(a) str(a)
+#define istr(a) #a
+#define xstr(a) istr(a)
 const std::string kZgwVersion = xstr(_GITVER_);
 const std::string kZgwCompileDate = xstr(_COMPILEDATE_);
 const std::string kZgwPidFile = "zgw.pid";

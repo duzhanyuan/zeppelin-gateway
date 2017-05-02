@@ -1,6 +1,7 @@
 #include "src/zgw_monitor.h"
 
 #include <string>
+#include <sstream>
 
 #include <glog/logging.h>
 #include "src/zgw_config.h"
@@ -15,8 +16,8 @@ static const std::string kMonitorInfoPrefix = "__zgw_monitorinfo_";
 ZgwMonitor::ZgwMonitor()
       : initialed(false),
         need_update_bucket_vol (false),
-        zgw_meta_volumn_(0),
-        zgw_data_volumn_(0),
+        zgw_meta_volume_(0),
+        zgw_data_volume_(0),
         cluster_traffic_(0),
         request_count_(0),
         upload_part_time_(0),
@@ -27,14 +28,14 @@ ZgwMonitor::ZgwMonitor()
 }
 
 void ZgwMonitor::AddBucketVol(const std::string& bucket_name, uint64_t size) {
-  if (bucket_volumn_.count(bucket_name)) {
-    bucket_volumn_[bucket_name] += size;
+  if (bucket_volume_.count(bucket_name)) {
+    bucket_volume_[bucket_name] += size;
   } else {
-    bucket_volumn_[bucket_name] = size;
+    bucket_volume_[bucket_name] = size;
   }
-  uint64_t final_size = bucket_volumn_[bucket_name];
+  uint64_t final_size = bucket_volume_[bucket_name];
   if (final_size == 0) {
-    bucket_volumn_.erase(bucket_name);
+    bucket_volume_.erase(bucket_name);
   }
 }
 
@@ -55,8 +56,8 @@ void ZgwMonitor::AddClusterTraffic(uint64_t size) {
 }
 
 void ZgwMonitor::DelBucketVol(const std::string& bucket_name, uint64_t size) {
-  if (bucket_volumn_.count(bucket_name)) {
-    auto& vol = bucket_volumn_[bucket_name];
+  if (bucket_volume_.count(bucket_name)) {
+    auto& vol = bucket_volume_[bucket_name];
     if (vol < size) {
       vol = 0;
     } else {
@@ -64,7 +65,7 @@ void ZgwMonitor::DelBucketVol(const std::string& bucket_name, uint64_t size) {
     }
 
     if (vol == 0) {
-      bucket_volumn_.erase(bucket_name);
+      bucket_volume_.erase(bucket_name);
     }
   }
 }
@@ -176,34 +177,67 @@ static std::string InterfaceString(S3Interface iface) {
 }
 
 std::string ZgwMonitor::GetFormatInfo() {
-  std::string result;
-  result += "qps: " + std::to_string(qps()) + "\r\n";
-  result += "cluster meta volumn: " + std::to_string(zgw_meta_volumn_.load()) + " bytes\r\n";
-  result += "cluster data volumn: " + std::to_string(zgw_data_volumn_.load()) + " bytes\r\n";
-  result += "cluster traffic: " + std::to_string(cluster_traffic_.load()) + " bytes\r\n";
-  result += "buckets volumn: \r\n";
-  for (auto& info : bucket_volumn_) {
-    result += "\t-" + info.first + " " + std::to_string(info.second) + " bytes\r\n";
+  // JSON
+  char line[1024] = {0};
+  std::ostringstream result;
+
+  sprintf(line, "{\"qps\": \"%lu\",", qps());
+  result << line;
+
+  result << "\"cluster_info\": {";
+  sprintf(line, "\"meta_volume\": \"%lu\",", zgw_meta_volume_.load());
+  result << line;
+  sprintf(line, "\"data_volume\": \"%lu\",", zgw_data_volume_.load());
+  result << line;
+  sprintf(line, "\"traffic\": \"%lu\"},", cluster_traffic_.load());
+  result << line;
+
+  result << "\"buckets_volume\": {";
+  for (auto& info : bucket_volume_) {
+    sprintf(line, "\"%s\": \"%lu\",", info.first.c_str(), info.second);
+    result << line;
   }
-  result += "buckets traffic: \r\n";
+  sprintf(line, "\"\": \"\"},"); // empty value
+  result << line;
+
+  result << "\"buckets_traffic\": {";
   for (auto& info : bucket_traffic_) {
-    result += "\t-" + info.first + " " + std::to_string(info.second) + " bytes\r\n";
+    sprintf(line, "\"%s\": \"%lu\",", info.first.c_str(), info.second);
+    result << line;
   }
-  result += "api request count: \r\n";
+  sprintf(line, "\"\": \"\"},"); // empty value
+  result << line;
+
+  result << "\"api_request_count\": {";
   for (auto& info : api_request_count_) {
-    result += "\t-" + InterfaceString(info.first) + std::to_string(info.second) + "\r\n";
+    sprintf(line, "\"%s\": \"%lu\",", InterfaceString(info.first).c_str(), info.second);
+    result << line;
   }
-  result += "api err4xx count: \r\n";
+  sprintf(line, "\"\": \"\"},"); // empty value
+  result << line;
+  result << "\"api_error_count\": {";
+  result << "\"4xx_error\": {";
   for (auto& info : api_err4xx_count_) {
-    result += "\t-" + InterfaceString(info.first) + std::to_string(info.second) + "\r\n";
+    sprintf(line, "\"%s\": \"%lu\",", InterfaceString(info.first).c_str(), info.second);
+    result << line;
   }
-  result += "api err5xx count: \r\n";
+  sprintf(line, "\"\": \"\"},"); // empty value
+  result << line;
+  result << "\"5xx_error\": {";
   for (auto& info : api_err5xx_count_) {
-    result += "\t-" + InterfaceString(info.first) + std::to_string(info.second) + "\r\n";
+    sprintf(line, "\"%s\": \"%lu\",", InterfaceString(info.first).c_str(), info.second);
+    result << line;
   }
-  result += "request count: " + std::to_string(request_count_.load()) + "\r\n";
-  result += "upload part time: " + std::to_string(upload_part_time_.load()) + " ms\r\n";
-  return result;
+  sprintf(line, "\"\": \"\"}},"); // empty value
+  result << line;
+
+  sprintf(line, "\"request_count\": \"%lu\",", request_count_.load());
+  result << line;
+
+  sprintf(line, "\"partupload_time\": \"%lu\"}", upload_part_time_.load());
+  result << line;
+
+  return result.str();
 }
 
 std::string ZgwMonitor::MetaKey() const {
@@ -214,11 +248,11 @@ std::string ZgwMonitor::MetaKey() const {
 
 std::string ZgwMonitor::MetaValue() const {
   std::string result;
-  slash::PutFixed64(&result, zgw_meta_volumn_);
-  slash::PutFixed64(&result, zgw_data_volumn_);
+  slash::PutFixed64(&result, zgw_meta_volume_);
+  slash::PutFixed64(&result, zgw_data_volume_);
   slash::PutFixed64(&result, cluster_traffic_);
-  slash::PutFixed64(&result, bucket_volumn_.size());
-  for (auto& n : bucket_volumn_) {
+  slash::PutFixed64(&result, bucket_volume_.size());
+  for (auto& n : bucket_volume_) {
     slash::PutLengthPrefixedString(&result, n.first);
     slash::PutFixed64(&result, n.second);
   }
@@ -252,9 +286,9 @@ Status ZgwMonitor::ParseMetaValue(std::string* value) {
   uint64_t tmp;
   bool res = true;
   slash::GetFixed64(value, &tmp);
-  zgw_meta_volumn_.store(tmp);
+  zgw_meta_volume_.store(tmp);
   slash::GetFixed64(value, &tmp);
-  zgw_data_volumn_.store(tmp);
+  zgw_data_volume_.store(tmp);
   slash::GetFixed64(value, &tmp);
   cluster_traffic_ = tmp;
   slash::GetFixed64(value, &tmp);
@@ -263,7 +297,7 @@ Status ZgwMonitor::ParseMetaValue(std::string* value) {
     uint64_t tmp1;
     res = res && slash::GetLengthPrefixedString(value, &tmpstr);
     slash::GetFixed64(value, &tmp1);
-    bucket_volumn_.insert(std::make_pair(tmpstr, tmp1));
+    bucket_volume_.insert(std::make_pair(tmpstr, tmp1));
   }
   slash::GetFixed64(value, &tmp);
   for (uint64_t i = 0; i < tmp; i++) {
@@ -327,10 +361,10 @@ bool ZgwMonitor::ShouldUpdate() {
 void ZgwMonitor::Reset() {
   ClearBucketVol();
   need_update_bucket_vol = true;
-  zgw_meta_volumn_ = 0;   // Used
-  zgw_data_volumn_ = 0; // Available
+  zgw_meta_volume_ = 0;   // Used
+  zgw_data_volume_ = 0; // Available
   cluster_traffic_ = 0;
-  bucket_volumn_.clear();
+  bucket_volume_.clear();
   bucket_traffic_.clear();
   api_request_count_.clear();
   api_err4xx_count_.clear();
@@ -377,7 +411,7 @@ void ZgwMonitorHandle::UpdateClusterVol() const {
   zgw_monitor_->SetClusterVol(meta_vol, data_vol);
 }
 
-// Scan all Buckets and calculate volumn
+// Scan all Buckets and calculate volume
 void ZgwMonitorHandle::UpdateBucketVol() const {
   LOG(INFO) << "UpdateBucketVol";
   zgw_monitor_->ClearBucketVol();

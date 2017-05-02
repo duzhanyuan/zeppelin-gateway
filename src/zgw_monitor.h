@@ -20,8 +20,8 @@ class ZgwMonitor {
   void AddBucketTraffic(const std::string& bucket_name, uint64_t size);
   void AddClusterTraffic(uint64_t size);
   void SetClusterVol(uint64_t meta_vol, uint64_t data_vol) {
-    zgw_meta_volumn_ = meta_vol;
-    zgw_data_volumn_ = data_vol;
+    zgw_meta_volume_ = meta_vol;
+    zgw_data_volume_ = data_vol;
   }
 
   void AddRequest();
@@ -43,17 +43,17 @@ class ZgwMonitor {
   }
   void ClearBucketVol() {
     bucket_update_time_ = 0;
-    bucket_volumn_.clear();
+    bucket_volume_.clear();
   }
   bool initialed;
   bool need_update_bucket_vol;
 
  private:
-  std::atomic<uint64_t> cluster_volumn_;   // Used
-  std::atomic<uint64_t> zgw_meta_volumn_;
-  std::atomic<uint64_t> zgw_data_volumn_;
+  std::atomic<uint64_t> cluster_volume_;   // Used
+  std::atomic<uint64_t> zgw_meta_volume_;
+  std::atomic<uint64_t> zgw_data_volume_;
   std::atomic<uint64_t> cluster_traffic_;
-  std::map<std::string, uint64_t> bucket_volumn_;
+  std::map<std::string, uint64_t> bucket_volume_;
   std::map<std::string, uint64_t> bucket_traffic_;
   std::map<S3Interface, uint64_t> api_request_count_;
   std::map<S3Interface, uint64_t> api_err4xx_count_;
