@@ -52,6 +52,8 @@ ZgwConn::ZgwConn(const int fd,
 
 void ZgwConn::DealMessage(const pink::HttpRequest* req, pink::HttpResponse* resp) {
   Timer t("DealMessage " + ip_port() + ":");
+  time_t now = time(0);
+  LOG(INFO) << "Request from: " << ip_port() << ", " << ctime(&now);
   // DumpHttpRequest(req);
   g_zgw_server->zgw_monitor()->AddQueryNum();
   g_zgw_server->zgw_monitor()->AddRequest();
